@@ -2,10 +2,17 @@
   import { onMount, onDestroy, tick } from 'svelte'
 
   // --- Grid & timing ---
-  // FUTURE: expose TICK_MS as a prop to implement difficulty levels
   const GRID_COLS = 20
   const GRID_ROWS = 20
-  const TICK_MS   = 150
+
+  const DIFFICULTIES = {
+    easy:   { label: 'Easy',   tickMs: 220, hint: 'Relaxed pace' },
+    normal: { label: 'Normal', tickMs: 150, hint: 'Classic speed' },
+    hard:   { label: 'Hard',   tickMs: 75,  hint: 'Full throttle' },
+  }
+
+  let difficulty = null
+  $: tickMs = difficulty ? DIFFICULTIES[difficulty].tickMs : 150
 
   // CELL_SIZE is computed dynamically from the viewport at mount and on resize.
   // CANVAS_W/H are reactive and drive the <canvas> width/height attributes.
@@ -191,7 +198,13 @@
     // FUTURE: submit score to a high score API or localStorage here
   }
 
+  function startWithDifficulty(d) {
+    difficulty = d
+    initGame()
+  }
+
   function restartGame() {
+    difficulty = null
     initGame()
   }
 
@@ -200,13 +213,13 @@
   function startGameLoop() {
     function loop(timestamp) {
       if (lastTimestamp !== null) {
-        const dt = Math.min(timestamp - lastTimestamp, TICK_MS * 2)
+        const dt = Math.min(timestamp - lastTimestamp, tickMs * 2)
         if (started && !gameOver) {
           accumulator += dt
-          while (accumulator >= TICK_MS) {
+          while (accumulator >= tickMs) {
             prevSnake = snake.map(s => ({ ...s }))
             tickLogic()
-            accumulator -= TICK_MS
+            accumulator -= tickMs
             if (gameOver) { accumulator = 0; break }
           }
         }
@@ -214,7 +227,7 @@
       lastTimestamp = timestamp
 
       const t = (started && !gameOver && prevSnake.length > 0)
-        ? accumulator / TICK_MS
+        ? accumulator / tickMs
         : 0
       render(t, timestamp)
       rafId = requestAnimationFrame(loop)
@@ -443,7 +456,22 @@
   <div class="canvas-container">
     <canvas bind:this={canvas} width={CANVAS_W} height={CANVAS_H}></canvas>
 
-    {#if gameOver}
+    {#if !difficulty}
+      <div class="overlay">
+        <p class="difficulty-title">Choose Difficulty</p>
+        <div class="difficulty-buttons">
+          {#each Object.entries(DIFFICULTIES) as [key, def]}
+            <button
+              class="diff-btn diff-{key}"
+              on:click={() => startWithDifficulty(key)}
+            >
+              <span class="diff-label">{def.label}</span>
+              <span class="diff-hint">{def.hint}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    {:else if gameOver}
       <div class="overlay">
         <p class="game-over-text">Game Over</p>
         <p class="final-score">Score: {score}</p>
@@ -523,6 +551,71 @@
   }
 
   button:hover {
+    background: #e84040;
+    box-shadow: 0 0 16px rgba(232,64,64,0.5);
+  }
+
+  .difficulty-title {
+    font-size: clamp(1.3rem, 3.5vw, 2rem);
+    font-weight: 800;
+    color: #e0e0e0;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 0.25rem;
+  }
+
+  .difficulty-buttons {
+    display: flex;
+    gap: 0.75rem;
+  }
+
+  .diff-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.65rem 1.4rem;
+    border-radius: 6px;
+    text-transform: none;
+    letter-spacing: 0.03em;
+    min-width: 90px;
+  }
+
+  .diff-label {
+    font-size: 1.05rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .diff-hint {
+    font-size: 0.72rem;
+    font-weight: 400;
+    opacity: 0.75;
+    text-transform: none;
+    letter-spacing: 0.02em;
+  }
+
+  .diff-easy {
+    background: #15803d;
+  }
+  .diff-easy:hover {
+    background: #16a34a;
+    box-shadow: 0 0 16px rgba(22,163,74,0.5);
+  }
+
+  .diff-normal {
+    background: #b45309;
+  }
+  .diff-normal:hover {
+    background: #d97706;
+    box-shadow: 0 0 16px rgba(217,119,6,0.5);
+  }
+
+  .diff-hard {
+    background: #cc1414;
+  }
+  .diff-hard:hover {
     background: #e84040;
     box-shadow: 0 0 16px rgba(232,64,64,0.5);
   }
