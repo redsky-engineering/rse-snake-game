@@ -2,10 +2,14 @@
   import { onMount, onDestroy, tick } from 'svelte'
 
   // --- Grid & timing ---
-  // FUTURE: expose TICK_MS as a prop to implement difficulty levels
-  const GRID_COLS = 20
-  const GRID_ROWS = 20
-  const TICK_MS   = 150
+  const GRID_COLS    = 20
+  const GRID_ROWS    = 20
+  const BASE_TICK_MS = 150
+  const MIN_TICK_MS  = 55
+
+  // Speed increases every 3 points, bottoms out at MIN_TICK_MS
+  $: tickMs = Math.max(MIN_TICK_MS, BASE_TICK_MS - Math.floor(score / 3) * 10)
+  $: level  = Math.floor((BASE_TICK_MS - tickMs) / 10) + 1
 
   // CELL_SIZE is computed dynamically from the viewport at mount and on resize.
   // CANVAS_W/H are reactive and drive the <canvas> width/height attributes.
@@ -200,13 +204,13 @@
   function startGameLoop() {
     function loop(timestamp) {
       if (lastTimestamp !== null) {
-        const dt = Math.min(timestamp - lastTimestamp, TICK_MS * 2)
+        const dt = Math.min(timestamp - lastTimestamp, tickMs * 2)
         if (started && !gameOver) {
           accumulator += dt
-          while (accumulator >= TICK_MS) {
+          while (accumulator >= tickMs) {
             prevSnake = snake.map(s => ({ ...s }))
             tickLogic()
-            accumulator -= TICK_MS
+            accumulator -= tickMs
             if (gameOver) { accumulator = 0; break }
           }
         }
@@ -214,7 +218,7 @@
       lastTimestamp = timestamp
 
       const t = (started && !gameOver && prevSnake.length > 0)
-        ? accumulator / TICK_MS
+        ? accumulator / tickMs
         : 0
       render(t, timestamp)
       rafId = requestAnimationFrame(loop)
@@ -438,7 +442,10 @@
 </script>
 
 <div class="game-wrapper">
-  <div class="score-bar">Score: <strong>{score}</strong></div>
+  <div class="score-bar">
+    Score: <strong>{score}</strong>
+    <span class="level-badge" class:fast={level > 5}>Lvl {level}</span>
+  </div>
 
   <div class="canvas-container">
     <canvas bind:this={canvas} width={CANVAS_W} height={CANVAS_H}></canvas>
@@ -466,6 +473,29 @@
     min-width: 160px;
     text-align: center;
     letter-spacing: 0.04em;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .level-badge {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.18rem 0.55rem;
+    border-radius: 3px;
+    background: rgba(204, 20, 20, 0.18);
+    color: #cc1414;
+    border: 1px solid rgba(204, 20, 20, 0.35);
+    transition: background 0.3s, color 0.3s, border-color 0.3s;
+  }
+
+  .level-badge.fast {
+    background: rgba(232, 64, 64, 0.28);
+    color: #e84040;
+    border-color: rgba(232, 64, 64, 0.6);
+    box-shadow: 0 0 8px rgba(232, 64, 64, 0.3);
   }
 
   .canvas-container {
