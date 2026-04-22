@@ -28,6 +28,181 @@
   let gameOver = false
   let started  = false
 
+  // --- Audio ---
+  let audioCtx    = null
+  let noiseBuffer = null
+
+  function getAudioCtx() {
+    if (!audioCtx) {
+      audioCtx    = new AudioContext()
+      noiseBuffer = null
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume()
+    return audioCtx
+  }
+
+  function playEatSound() {
+    const ac = getAudioCtx()
+    const osc = ac.createOscillator()
+    const gain = ac.createGain()
+    osc.connect(gain)
+    gain.connect(ac.destination)
+    osc.frequency.setValueAtTime(520, ac.currentTime)
+    osc.frequency.exponentialRampToValueAtTime(880, ac.currentTime + 0.08)
+    gain.gain.setValueAtTime(0.18, ac.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.18)
+    osc.start(ac.currentTime)
+    osc.stop(ac.currentTime + 0.18)
+  }
+
+  function playGameOverSound() {
+    const ac = getAudioCtx()
+    const now = ac.currentTime
+    ;[440, 330, 200].forEach((freq, i) => {
+      const osc = ac.createOscillator()
+      const gain = ac.createGain()
+      osc.connect(gain)
+      gain.connect(ac.destination)
+      osc.type = 'sawtooth'
+      osc.frequency.setValueAtTime(freq, now + i * 0.13)
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.7, now + i * 0.13 + 0.22)
+      gain.gain.setValueAtTime(0.14, now + i * 0.13)
+      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.13 + 0.28)
+      osc.start(now + i * 0.13)
+      osc.stop(now + i * 0.13 + 0.28)
+    })
+  }
+
+  // --- Music ---
+  let musicPlaying     = false
+  let musicStep        = 0
+  let musicNextTime    = 0
+  let musicSchedulerId = null
+
+  const MUSIC_BPM   = 130
+  const STEP_S      = 60 / MUSIC_BPM / 2   // eighth-note duration
+  const LOOK_AHEAD  = 0.1                   // seconds to schedule ahead
+  const SCHED_MS    = 50                    // scheduler poll interval
+
+  // A-minor pentatonic, 4-bar loop (32 × eighth notes ≈ 7.4 s)
+  const BASS_PAT = [
+    45,null,52,null, 45,null,45,null,
+    43,null,45,null, 52,null,45,null,
+    45,null,52,null, 50,45,  52,null,
+    45,null,45,null, 45,50,  52,null
+  ]
+  const MELODY_PAT = [
+    69,null,null,72, 76,74, null,72,
+    69,null,67, 69, null,64, 67,null,
+    72,null,null,76, 74,72, null,69,
+    67,69,  null,72, 69,null,67,null
+  ]
+  const KICK_PAT = [
+    1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0,
+    1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,1,0
+  ]
+  const HAT_PAT = [
+    0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,0,
+    0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,0
+  ]
+
+  function midiHz(midi) { return 440 * Math.pow(2, (midi - 69) / 12) }
+
+  function getNoiseBuf() {
+    if (noiseBuffer) return noiseBuffer
+    const ac  = getAudioCtx()
+    const len = Math.floor(ac.sampleRate * 0.05)
+    noiseBuffer = ac.createBuffer(1, len, ac.sampleRate)
+    const d = noiseBuffer.getChannelData(0)
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1
+    return noiseBuffer
+  }
+
+  function schedBass(midi, t) {
+    const ac   = getAudioCtx()
+    const osc  = ac.createOscillator()
+    const filt = ac.createBiquadFilter()
+    const g    = ac.createGain()
+    osc.type = 'sawtooth'
+    osc.frequency.value  = midiHz(midi)
+    filt.type            = 'lowpass'
+    filt.frequency.value = 700
+    g.gain.setValueAtTime(0.15, t)
+    g.gain.exponentialRampToValueAtTime(0.001, t + STEP_S * 0.85)
+    osc.connect(filt); filt.connect(g); g.connect(ac.destination)
+    osc.start(t); osc.stop(t + STEP_S)
+  }
+
+  function schedMelody(midi, t) {
+    const ac  = getAudioCtx()
+    const osc = ac.createOscillator()
+    const g   = ac.createGain()
+    osc.type = 'square'
+    osc.frequency.value = midiHz(midi)
+    g.gain.setValueAtTime(0.04, t)
+    g.gain.exponentialRampToValueAtTime(0.001, t + STEP_S * 1.9)
+    osc.connect(g); g.connect(ac.destination)
+    osc.start(t); osc.stop(t + STEP_S * 2)
+  }
+
+  function schedKick(t) {
+    const ac  = getAudioCtx()
+    const osc = ac.createOscillator()
+    const g   = ac.createGain()
+    osc.frequency.setValueAtTime(160, t)
+    osc.frequency.exponentialRampToValueAtTime(40, t + 0.08)
+    g.gain.setValueAtTime(0.28, t)
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.18)
+    osc.connect(g); g.connect(ac.destination)
+    osc.start(t); osc.stop(t + 0.2)
+  }
+
+  function schedHat(t) {
+    const ac   = getAudioCtx()
+    const src  = ac.createBufferSource()
+    src.buffer = getNoiseBuf()
+    const filt = ac.createBiquadFilter()
+    filt.type            = 'highpass'
+    filt.frequency.value = 7000
+    const g = ac.createGain()
+    g.gain.setValueAtTime(0.06, t)
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.04)
+    src.connect(filt); filt.connect(g); g.connect(ac.destination)
+    src.start(t); src.stop(t + 0.05)
+  }
+
+  function musicSchedule() {
+    if (!musicPlaying) return
+    const ac = getAudioCtx()
+    while (musicNextTime < ac.currentTime + LOOK_AHEAD) {
+      const i = musicStep % BASS_PAT.length
+      if (BASS_PAT[i]   != null) schedBass(BASS_PAT[i], musicNextTime)
+      if (MELODY_PAT[i] != null) schedMelody(MELODY_PAT[i], musicNextTime)
+      if (KICK_PAT[i])           schedKick(musicNextTime)
+      if (HAT_PAT[i])            schedHat(musicNextTime)
+      musicNextTime += STEP_S
+      musicStep++
+    }
+    musicSchedulerId = setTimeout(musicSchedule, SCHED_MS)
+  }
+
+  function startMusic() {
+    if (musicPlaying) return
+    const ac      = getAudioCtx()
+    musicPlaying  = true
+    musicStep     = 0
+    musicNextTime = ac.currentTime + 0.05
+    musicSchedule()
+  }
+
+  function stopMusic() {
+    musicPlaying = false
+    if (musicSchedulerId !== null) {
+      clearTimeout(musicSchedulerId)
+      musicSchedulerId = null
+    }
+  }
+
   // --- Canvas ---
   let canvas
   let ctx
@@ -156,7 +331,7 @@
     event.preventDefault()
     if (mapped.x === -direction.x && mapped.y === -direction.y) return
     nextDirection = mapped
-    if (!started) started = true
+    if (!started) { started = true; startMusic() }
   }
 
   // Pure logic step — rendering is handled entirely by the RAF loop.
@@ -179,6 +354,7 @@
     if (newHead.x === food.x && newHead.y === food.y) {
       // FUTURE: score multipliers, combo chains, or level-up thresholds go here
       score += 1
+      playEatSound()
       spawnFood()
     } else {
       snake = snake.slice(0, -1)
@@ -188,10 +364,13 @@
   function endGame() {
     gameOver    = true
     accumulator = 0
+    stopMusic()
+    playGameOverSound()
     // FUTURE: submit score to a high score API or localStorage here
   }
 
   function restartGame() {
+    stopMusic()
     initGame()
   }
 
@@ -434,6 +613,8 @@
     clearTimeout(resizeTimer)
     window.removeEventListener('keydown', handleKeyDown)
     window.removeEventListener('resize', handleResize)
+    stopMusic()
+    if (audioCtx) audioCtx.close()
   })
 </script>
 
