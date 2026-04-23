@@ -2,10 +2,11 @@
   import { onMount, onDestroy, tick } from 'svelte'
 
   // --- Grid & timing ---
-  // FUTURE: expose TICK_MS as a prop to implement difficulty levels
-  const GRID_COLS = 20
-  const GRID_ROWS = 20
-  const TICK_MS   = 150
+  // FUTURE: expose TICK_MS_BASE as a prop to implement difficulty levels
+  const GRID_COLS      = 20
+  const GRID_ROWS      = 20
+  const TICK_MS_BASE   = 150
+  let   tickMs         = TICK_MS_BASE   // mutated by boost / slow power-ups
 
   // CELL_SIZE is computed dynamically from the viewport at mount and on resize.
   // CANVAS_W/H are reactive and drive the <canvas> width/height attributes.
@@ -27,6 +28,43 @@
   let score   = 0
   let gameOver = false
   let started  = false
+
+  // Direction inputs are buffered so rapid sequences (e.g. up→left while moving
+  // right) both land instead of one clobbering the other between ticks.
+  let inputQueue = []
+
+  // --- Obstacles ---
+  // Static hazards that spawn every OBSTACLE_EVERY pellets eaten. Colliding
+  // with one ends the game, just like hitting a wall.
+  const OBSTACLE_EVERY    = 3    // one new obstacle per N pellets eaten
+  const OBSTACLE_MIN_DIST = 3    // Manhattan distance from head when spawning
+  let obstacles    = []
+  let pelletsEaten = 0
+
+  // --- Power-ups ---
+  //   boost: temporary speed-up
+  //   slow : temporary slow-down
+  //   half : instantly halves snake length
+  // Power-ups appear probabilistically after a normal pellet is eaten, linger
+  // for POWERUP_TTL_TICKS, then vanish. Picking one up does NOT grow the snake,
+  // but awards a score bonus and plays a distinct sound.
+  const POWERUP_TYPES        = ['boost', 'slow', 'half']
+  const POWERUP_SPAWN_CHANCE = 0.28
+  const POWERUP_TTL_TICKS    = 45
+  const POWERUP_BOOST_TICKS  = 50
+  const POWERUP_SLOW_TICKS   = 50
+  const POWERUP_BOOST_MULT   = 0.55   // smaller tickMs = faster snake
+  const POWERUP_SLOW_MULT    = 1.75   // larger  tickMs = slower snake
+  const POWERUP_SCORE_BONUS  = 3
+
+  const POWERUP_COLORS = {
+    boost: { core: '#facc15', mid: '#fde68a', symbol: '⚡' },
+    slow:  { core: '#22d3ee', mid: '#a5f3fc', symbol: '❄' },
+    half:  { core: '#22c55e', mid: '#86efac', symbol: '½' }
+  }
+
+  let powerUp      = null  // { x, y, type, ticksLeft }
+  let activeEffect = null  // { type, ticksLeft } for 'boost' or 'slow'
 
   // --- Audio ---
   let audioCtx    = null
@@ -71,6 +109,60 @@
       osc.start(now + i * 0.13)
       osc.stop(now + i * 0.13 + 0.28)
     })
+  }
+
+  function playPowerUpSound(type) {
+    const ac = getAudioCtx()
+    const t0 = ac.currentTime
+
+    if (type === 'boost') {
+      // Fast ascending triad
+      for (let i = 0; i < 3; i++) {
+        const osc = ac.createOscillator()
+        const g   = ac.createGain()
+        osc.connect(g); g.connect(ac.destination)
+        osc.type = 'triangle'
+        osc.frequency.setValueAtTime(660 + i * 220, t0 + i * 0.055)
+        g.gain.setValueAtTime(0.2, t0 + i * 0.055)
+        g.gain.exponentialRampToValueAtTime(0.001, t0 + i * 0.055 + 0.14)
+        osc.start(t0 + i * 0.055)
+        osc.stop(t0 + i * 0.055 + 0.16)
+      }
+    } else if (type === 'slow') {
+      // Descending sine swoop
+      const osc = ac.createOscillator()
+      const g   = ac.createGain()
+      osc.connect(g); g.connect(ac.destination)
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(720, t0)
+      osc.frequency.exponentialRampToValueAtTime(180, t0 + 0.45)
+      g.gain.setValueAtTime(0.22, t0)
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.5)
+      osc.start(t0); osc.stop(t0 + 0.55)
+    } else if (type === 'half') {
+      // Two scissor-like square clicks + bandpassed noise
+      for (const off of [0, 0.1]) {
+        const osc = ac.createOscillator()
+        const g   = ac.createGain()
+        osc.connect(g); g.connect(ac.destination)
+        osc.type = 'square'
+        osc.frequency.setValueAtTime(1200, t0 + off)
+        osc.frequency.exponentialRampToValueAtTime(520, t0 + off + 0.06)
+        g.gain.setValueAtTime(0.18, t0 + off)
+        g.gain.exponentialRampToValueAtTime(0.001, t0 + off + 0.08)
+        osc.start(t0 + off); osc.stop(t0 + off + 0.09)
+      }
+      const src  = ac.createBufferSource()
+      src.buffer = getNoiseBuf()
+      const filt = ac.createBiquadFilter()
+      filt.type            = 'bandpass'
+      filt.frequency.value = 3000
+      const g = ac.createGain()
+      g.gain.setValueAtTime(0.12, t0)
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.18)
+      src.connect(filt); filt.connect(g); g.connect(ac.destination)
+      src.start(t0); src.stop(t0 + 0.2)
+    }
   }
 
   // --- Music ---
@@ -304,19 +396,80 @@
     prevSnake     = []
     accumulator   = 0
     lastTimestamp = null
+    powerUp       = null
+    activeEffect  = null
+    tickMs        = TICK_MS_BASE
+    inputQueue    = []
+    obstacles     = []
+    pelletsEaten  = 0
     spawnFood()
   }
 
   function spawnFood() {
-    // FUTURE: return { x, y, type } here to support power-ups
     let pos
     do {
       pos = {
         x: Math.floor(Math.random() * GRID_COLS),
         y: Math.floor(Math.random() * GRID_ROWS)
       }
-    } while (snake.some(s => s.x === pos.x && s.y === pos.y))
+    } while (
+      snake.some(s => s.x === pos.x && s.y === pos.y) ||
+      (powerUp && pos.x === powerUp.x && pos.y === powerUp.y) ||
+      obstacles.some(o => o.x === pos.x && o.y === pos.y)
+    )
     food = pos
+  }
+
+  function maybeSpawnPowerUp() {
+    if (powerUp) return
+    if (Math.random() > POWERUP_SPAWN_CHANCE) return
+    const type = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)]
+    let pos, attempts = 0
+    do {
+      pos = {
+        x: Math.floor(Math.random() * GRID_COLS),
+        y: Math.floor(Math.random() * GRID_ROWS)
+      }
+      if (++attempts > 50) return
+    } while (
+      snake.some(s => s.x === pos.x && s.y === pos.y) ||
+      (pos.x === food.x && pos.y === food.y) ||
+      obstacles.some(o => o.x === pos.x && o.y === pos.y)
+    )
+    powerUp = { x: pos.x, y: pos.y, type, ticksLeft: POWERUP_TTL_TICKS }
+  }
+
+  function spawnObstacle() {
+    const head = snake[0]
+    let pos, attempts = 0
+    do {
+      pos = {
+        x: Math.floor(Math.random() * GRID_COLS),
+        y: Math.floor(Math.random() * GRID_ROWS)
+      }
+      if (++attempts > 100) return   // board too crowded; skip this round
+    } while (
+      snake.some(s => s.x === pos.x && s.y === pos.y) ||
+      (pos.x === food.x && pos.y === food.y) ||
+      (powerUp && pos.x === powerUp.x && pos.y === powerUp.y) ||
+      obstacles.some(o => o.x === pos.x && o.y === pos.y) ||
+      (Math.abs(pos.x - head.x) + Math.abs(pos.y - head.y) < OBSTACLE_MIN_DIST)
+    )
+    obstacles = [...obstacles, pos]
+  }
+
+  function applyPowerUp(type) {
+    if (type === 'boost') {
+      activeEffect = { type: 'boost', ticksLeft: POWERUP_BOOST_TICKS }
+      tickMs = TICK_MS_BASE * POWERUP_BOOST_MULT
+    } else if (type === 'slow') {
+      activeEffect = { type: 'slow', ticksLeft: POWERUP_SLOW_TICKS }
+      tickMs = TICK_MS_BASE * POWERUP_SLOW_MULT
+    } else if (type === 'half') {
+      const newLen = Math.max(3, Math.floor(snake.length / 2))
+      snake = snake.slice(0, newLen)
+      if (prevSnake.length > newLen) prevSnake = prevSnake.slice(0, newLen)
+    }
   }
 
   function handleKeyDown(event) {
@@ -329,15 +482,58 @@
     const mapped = keyMap[event.key]
     if (!mapped) return
     event.preventDefault()
-    if (mapped.x === -direction.x && mapped.y === -direction.y) return
-    nextDirection = mapped
+
+    // Validate against the *latest* intended direction (last queued, or current
+    // nextDirection if the queue is empty). Without this, pressing up→left
+    // while moving right would reject the "left" press against the stale
+    // `direction` even though the snake is about to head up.
+    const lastDir = inputQueue.length > 0
+      ? inputQueue[inputQueue.length - 1]
+      : nextDirection
+    if (mapped.x === -lastDir.x && mapped.y === -lastDir.y) return  // 180° reversal
+    if (mapped.x ===  lastDir.x && mapped.y ===  lastDir.y) return  // duplicate
+
+    inputQueue.push(mapped)
+    if (inputQueue.length > 2) inputQueue.shift()
+
+    // Eager tick: fast-forward the accumulator so the pending turn commits
+    // within ~40% of a tick instead of waiting out the full window. Makes
+    // controls feel snappy without actually changing game speed.
+    if (started && !gameOver) {
+      const minAccum = tickMs * 0.6
+      if (accumulator < minAccum) accumulator = minAccum
+    }
+
     if (!started) { started = true; startMusic() }
   }
 
   // Pure logic step — rendering is handled entirely by the RAF loop.
   function tickLogic() {
     if (gameOver) return
+
+    // Commit one queued direction change per tick (FIFO). Safety check against
+    // current direction so we never reverse into the body.
+    if (inputQueue.length > 0) {
+      const next = inputQueue.shift()
+      if (!(next.x === -direction.x && next.y === -direction.y)) {
+        nextDirection = next
+      }
+    }
     direction = { ...nextDirection }
+
+    // Age timed effect (boost / slow) and restore base speed when it ends.
+    if (activeEffect) {
+      activeEffect = { ...activeEffect, ticksLeft: activeEffect.ticksLeft - 1 }
+      if (activeEffect.ticksLeft <= 0) {
+        activeEffect = null
+        tickMs = TICK_MS_BASE
+      }
+    }
+    // Age any power-up waiting on the board; expire when its TTL runs out.
+    if (powerUp) {
+      powerUp = { ...powerUp, ticksLeft: powerUp.ticksLeft - 1 }
+      if (powerUp.ticksLeft <= 0) powerUp = null
+    }
 
     const head    = snake[0]
     const newHead = { x: head.x + direction.x, y: head.y + direction.y }
@@ -348,16 +544,30 @@
     if (snake.some(s => s.x === newHead.x && s.y === newHead.y)) {
       endGame(); return
     }
+    if (obstacles.some(o => o.x === newHead.x && o.y === newHead.y)) {
+      endGame(); return
+    }
 
     snake = [newHead, ...snake]
 
     if (newHead.x === food.x && newHead.y === food.y) {
-      // FUTURE: score multipliers, combo chains, or level-up thresholds go here
       score += 1
+      pelletsEaten += 1
       playEatSound()
       spawnFood()
+      maybeSpawnPowerUp()
+      if (pelletsEaten % OBSTACLE_EVERY === 0) spawnObstacle()
     } else {
       snake = snake.slice(0, -1)
+    }
+
+    // Power-up pickup — does NOT grow the snake, but triggers its effect.
+    if (powerUp && newHead.x === powerUp.x && newHead.y === powerUp.y) {
+      const type = powerUp.type
+      powerUp = null
+      score += POWERUP_SCORE_BONUS
+      playPowerUpSound(type)
+      applyPowerUp(type)
     }
   }
 
@@ -379,13 +589,13 @@
   function startGameLoop() {
     function loop(timestamp) {
       if (lastTimestamp !== null) {
-        const dt = Math.min(timestamp - lastTimestamp, TICK_MS * 2)
+        const dt = Math.min(timestamp - lastTimestamp, tickMs * 2)
         if (started && !gameOver) {
           accumulator += dt
-          while (accumulator >= TICK_MS) {
+          while (accumulator >= tickMs) {
             prevSnake = snake.map(s => ({ ...s }))
             tickLogic()
-            accumulator -= TICK_MS
+            accumulator -= tickMs
             if (gameOver) { accumulator = 0; break }
           }
         }
@@ -393,7 +603,7 @@
       lastTimestamp = timestamp
 
       const t = (started && !gameOver && prevSnake.length > 0)
-        ? accumulator / TICK_MS
+        ? accumulator / tickMs
         : 0
       render(t, timestamp)
       rafId = requestAnimationFrame(loop)
@@ -454,6 +664,101 @@
     ctx.arc(cx, cy, dotR, 0, Math.PI * 2)
     ctx.fillStyle = dot
     ctx.fill()
+  }
+
+  function drawObstacles(now) {
+    if (obstacles.length === 0) return
+    const rBase = CELL_SIZE * 0.42
+    const spikes = 6
+
+    for (const o of obstacles) {
+      const cx = o.x * CELL_SIZE + CELL_SIZE / 2
+      const cy = o.y * CELL_SIZE + CELL_SIZE / 2
+
+      // Faint red warning halo
+      const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, rBase * 1.7)
+      halo.addColorStop(0, 'rgba(220,38,38,0.22)')
+      halo.addColorStop(1, 'rgba(220,38,38,0)')
+      ctx.beginPath()
+      ctx.arc(cx, cy, rBase * 1.7, 0, Math.PI * 2)
+      ctx.fillStyle = halo
+      ctx.fill()
+
+      // Jagged 6-point star (caltrop)
+      ctx.beginPath()
+      for (let i = 0; i < spikes * 2; i++) {
+        const angle = (i / (spikes * 2)) * Math.PI * 2 - Math.PI / 2
+        const rad = i % 2 === 0 ? rBase : rBase * 0.48
+        const x = cx + Math.cos(angle) * rad
+        const y = cy + Math.sin(angle) * rad
+        if (i === 0) ctx.moveTo(x, y)
+        else         ctx.lineTo(x, y)
+      }
+      ctx.closePath()
+
+      const body = ctx.createRadialGradient(cx - rBase * 0.3, cy - rBase * 0.3, 0, cx, cy, rBase)
+      body.addColorStop(0, '#4b5563')
+      body.addColorStop(1, '#111827')
+      ctx.fillStyle = body
+      ctx.fill()
+
+      ctx.strokeStyle = 'rgba(220,38,38,0.7)'
+      ctx.lineWidth   = 1.5
+      ctx.stroke()
+    }
+  }
+
+  function hexToRgba(hex, a) {
+    const n = parseInt(hex.slice(1), 16)
+    const r = (n >> 16) & 255
+    const g = (n >> 8) & 255
+    const b = n & 255
+    return `rgba(${r},${g},${b},${a})`
+  }
+
+  function drawPowerUp(now) {
+    if (!powerUp) return
+    const style = POWERUP_COLORS[powerUp.type]
+    const cx = powerUp.x * CELL_SIZE + CELL_SIZE / 2
+    const cy = powerUp.y * CELL_SIZE + CELL_SIZE / 2
+
+    const pulse = 0.5 + 0.5 * Math.sin(now / 200)
+    const lowTtl = powerUp.ticksLeft < 12
+    const blink  = lowTtl ? 0.4 + 0.6 * Math.abs(Math.sin(now / 70)) : 1
+
+    const glowR = CELL_SIZE * (0.75 + 0.35 * pulse)
+    const dotR  = CELL_SIZE * 0.38
+
+    ctx.save()
+    ctx.globalAlpha = blink
+
+    // Outer pulsing glow (type-tinted)
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR)
+    glow.addColorStop(0,    hexToRgba(style.core, 0.55 + 0.25 * pulse))
+    glow.addColorStop(0.55, hexToRgba(style.core, 0.2 * pulse))
+    glow.addColorStop(1,    hexToRgba(style.core, 0))
+    ctx.beginPath()
+    ctx.arc(cx, cy, glowR, 0, Math.PI * 2)
+    ctx.fillStyle = glow
+    ctx.fill()
+
+    // Core disc with shiny highlight
+    const disc = ctx.createRadialGradient(cx - dotR * 0.3, cy - dotR * 0.3, 0, cx, cy, dotR)
+    disc.addColorStop(0, style.mid)
+    disc.addColorStop(1, style.core)
+    ctx.beginPath()
+    ctx.arc(cx, cy, dotR, 0, Math.PI * 2)
+    ctx.fillStyle = disc
+    ctx.fill()
+
+    // Symbol glyph
+    ctx.font         = `bold ${Math.round(CELL_SIZE * 0.5)}px system-ui, -apple-system, "Segoe UI Symbol"`
+    ctx.textAlign    = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle    = '#0c0c10'
+    ctx.fillText(style.symbol, cx, cy + 1)
+
+    ctx.restore()
   }
 
   function buildSnakePath(segments) {
@@ -570,7 +875,9 @@
 
     ctx.drawImage(bgCanvas, 0, 0)
 
+    drawObstacles(now)
     drawFood(now)
+    drawPowerUp(now)
 
     const segments = getDrawSegments(t)
     drawSnakeBody(segments, now)
@@ -619,7 +926,15 @@
 </script>
 
 <div class="game-wrapper">
-  <div class="score-bar">Score: <strong>{score}</strong></div>
+  <div class="score-bar">
+    <span>Score: <strong>{score}</strong></span>
+    {#if activeEffect}
+      <span class="effect-badge effect-{activeEffect.type}">
+        {#if activeEffect.type === 'boost'}⚡ BOOST{:else}❄ SLOW{/if}
+        <small>{(activeEffect.ticksLeft * tickMs / 1000).toFixed(1)}s</small>
+      </span>
+    {/if}
+  </div>
 
   <div class="canvas-container">
     <canvas bind:this={canvas} width={CANVAS_W} height={CANVAS_H}></canvas>
@@ -643,10 +958,53 @@
   }
 
   .score-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
     font-size: 1.1rem;
     min-width: 160px;
     text-align: center;
     letter-spacing: 0.04em;
+  }
+
+  .effect-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0.65rem;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    border: 1px solid transparent;
+    animation: effect-pulse 1.2s ease-in-out infinite;
+  }
+
+  .effect-badge small {
+    font-weight: 600;
+    opacity: 0.8;
+    font-size: 0.72rem;
+    letter-spacing: 0;
+  }
+
+  .effect-boost {
+    background: rgba(250, 204, 21, 0.14);
+    color: #facc15;
+    border-color: rgba(250, 204, 21, 0.45);
+  }
+
+  .effect-slow {
+    background: rgba(34, 211, 238, 0.14);
+    color: #22d3ee;
+    border-color: rgba(34, 211, 238, 0.45);
+  }
+
+  @keyframes effect-pulse {
+    0%, 100% { opacity: 1;    transform: scale(1); }
+    50%      { opacity: 0.75; transform: scale(0.97); }
   }
 
   .canvas-container {
