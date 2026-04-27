@@ -36,10 +36,24 @@
   // --- Obstacles ---
   // Static hazards that spawn every OBSTACLE_EVERY pellets eaten. Colliding
   // with one ends the game, just like hitting a wall.
-  const OBSTACLE_EVERY    = 3    // one new obstacle per N pellets eaten
+  const OBSTACLE_EVERY    = 3    // one spawn event per N pellets eaten
   const OBSTACLE_MIN_DIST = 3    // Manhattan distance from head when spawning
+  const OBSTACLE_MAX_BURST = 5   // upper cap on obstacles spawned per event
   let obstacles    = []
   let pelletsEaten = 0
+
+  // --- Missiles & explosions ---
+  // The snake auto-fires a projectile every MISSILE_FIRE_INTERVAL_MS in its
+  // current heading. Missiles travel smoothly between ticks (independent of
+  // snake speed) and detonate any obstacle they enter, leaving a brief
+  // explosion effect.
+  const MISSILE_FIRE_INTERVAL_MS = 2000
+  const MISSILE_SPEED            = 14    // cells per second
+  const EXPLOSION_TTL_MS         = 480
+  const OBSTACLE_DESTROY_BONUS   = 5
+  let   missiles            = []   // { x, y, dx, dy } in grid units (floats)
+  let   explosions          = []   // { x, y, startTime } grid units + pixel render
+  let   lastMissileFireTime = 0    // ms timestamp; 0 = "set on first frame"
 
   // --- Power-ups ---
   //   boost: temporary speed-up
@@ -55,7 +69,7 @@
   const POWERUP_SLOW_TICKS   = 50
   const POWERUP_BOOST_MULT   = 0.55   // smaller tickMs = faster snake
   const POWERUP_SLOW_MULT    = 1.75   // larger  tickMs = slower snake
-  const POWERUP_SCORE_BONUS  = 3
+  const POWERUP_SCORE_BONUS  = 10
 
   const POWERUP_COLORS = {
     boost: { core: '#facc15', mid: '#fde68a', symbol: '⚡' },
@@ -163,6 +177,49 @@
       src.connect(filt); filt.connect(g); g.connect(ac.destination)
       src.start(t0); src.stop(t0 + 0.2)
     }
+  }
+
+  function playMissileSound() {
+    const ac  = getAudioCtx()
+    const t0  = ac.currentTime
+    const osc = ac.createOscillator()
+    const g   = ac.createGain()
+    osc.type = 'square'
+    osc.frequency.setValueAtTime(1400, t0)
+    osc.frequency.exponentialRampToValueAtTime(380, t0 + 0.11)
+    g.gain.setValueAtTime(0.07, t0)
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.13)
+    osc.connect(g); g.connect(ac.destination)
+    osc.start(t0); osc.stop(t0 + 0.15)
+  }
+
+  function playExplosionSound() {
+    const ac = getAudioCtx()
+    const t0 = ac.currentTime
+
+    // Filtered noise burst — the "boom"
+    const src  = ac.createBufferSource()
+    src.buffer = getNoiseBuf()
+    src.loop   = true
+    const filt = ac.createBiquadFilter()
+    filt.type  = 'lowpass'
+    filt.frequency.setValueAtTime(2400, t0)
+    filt.frequency.exponentialRampToValueAtTime(180, t0 + 0.28)
+    const g = ac.createGain()
+    g.gain.setValueAtTime(0.28, t0)
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.32)
+    src.connect(filt); filt.connect(g); g.connect(ac.destination)
+    src.start(t0); src.stop(t0 + 0.34)
+
+    // Sub-bass thump for body
+    const osc = ac.createOscillator()
+    const g2  = ac.createGain()
+    osc.frequency.setValueAtTime(140, t0)
+    osc.frequency.exponentialRampToValueAtTime(40, t0 + 0.18)
+    g2.gain.setValueAtTime(0.22, t0)
+    g2.gain.exponentialRampToValueAtTime(0.001, t0 + 0.22)
+    osc.connect(g2); g2.connect(ac.destination)
+    osc.start(t0); osc.stop(t0 + 0.24)
   }
 
   // --- Music ---
@@ -402,6 +459,9 @@
     inputQueue    = []
     obstacles     = []
     pelletsEaten  = 0
+    missiles            = []
+    explosions          = []
+    lastMissileFireTime = 0
     spawnFood()
   }
 
@@ -556,7 +616,15 @@
       playEatSound()
       spawnFood()
       maybeSpawnPowerUp()
-      if (pelletsEaten % OBSTACLE_EVERY === 0) spawnObstacle()
+      if (pelletsEaten % OBSTACLE_EVERY === 0) {
+        // Burst size ramps with the spawn-event count: events 1–2 drop one
+        // obstacle, 3–4 drop two, etc., capped at OBSTACLE_MAX_BURST. This
+        // makes later play noticeably harder while leaving more targets to
+        // shoot for bonus score.
+        const spawnLevel = pelletsEaten / OBSTACLE_EVERY
+        const burst = Math.min(OBSTACLE_MAX_BURST, 1 + Math.floor((spawnLevel - 1) / 2))
+        for (let i = 0; i < burst; i++) spawnObstacle()
+      }
     } else {
       snake = snake.slice(0, -1)
     }
@@ -568,6 +636,65 @@
       score += POWERUP_SCORE_BONUS
       playPowerUpSound(type)
       applyPowerUp(type)
+    }
+  }
+
+  function fireMissile() {
+    if (snake.length === 0) return
+    const head = snake[0]
+    // Spawn just ahead of the head's center so the projectile is visibly
+    // launched rather than appearing to bloom inside the snake.
+    missiles = [...missiles, {
+      x: head.x + 0.5 + direction.x * 0.6,
+      y: head.y + 0.5 + direction.y * 0.6,
+      dx: direction.x,
+      dy: direction.y
+    }]
+    playMissileSound()
+  }
+
+  // Smooth, per-frame update for missiles and explosions. Runs independently
+  // of the fixed-timestep tick so projectiles glide cleanly across the board.
+  function updateProjectiles(dt, timestamp) {
+    if (lastMissileFireTime === 0) lastMissileFireTime = timestamp
+    if (timestamp - lastMissileFireTime >= MISSILE_FIRE_INTERVAL_MS) {
+      fireMissile()
+      lastMissileFireTime = timestamp
+    }
+
+    if (missiles.length > 0) {
+      const dts = dt / 1000
+      const survivors = []
+      let obstaclesChanged = false
+      let nextObstacles = obstacles
+
+      for (const m of missiles) {
+        m.x += m.dx * MISSILE_SPEED * dts
+        m.y += m.dy * MISSILE_SPEED * dts
+
+        if (m.x < -1 || m.x > GRID_COLS + 1 || m.y < -1 || m.y > GRID_ROWS + 1) continue
+
+        const cellX  = Math.floor(m.x)
+        const cellY  = Math.floor(m.y)
+        const hitIdx = nextObstacles.findIndex(o => o.x === cellX && o.y === cellY)
+        if (hitIdx !== -1) {
+          const o = nextObstacles[hitIdx]
+          nextObstacles = nextObstacles.filter((_, i) => i !== hitIdx)
+          obstaclesChanged = true
+          explosions = [...explosions, { x: o.x + 0.5, y: o.y + 0.5, startTime: timestamp }]
+          score += OBSTACLE_DESTROY_BONUS
+          playExplosionSound()
+          continue
+        }
+
+        survivors.push(m)
+      }
+      missiles = survivors
+      if (obstaclesChanged) obstacles = nextObstacles
+    }
+
+    if (explosions.length > 0) {
+      explosions = explosions.filter(e => timestamp - e.startTime < EXPLOSION_TTL_MS)
     }
   }
 
@@ -598,6 +725,7 @@
             accumulator -= tickMs
             if (gameOver) { accumulator = 0; break }
           }
+          if (!gameOver) updateProjectiles(dt, timestamp)
         }
       }
       lastTimestamp = timestamp
@@ -761,6 +889,84 @@
     ctx.restore()
   }
 
+  function drawMissiles(now) {
+    if (missiles.length === 0) return
+    for (const m of missiles) {
+      const cx = m.x * CELL_SIZE
+      const cy = m.y * CELL_SIZE
+      const tipR    = CELL_SIZE * 0.18
+      const tailLen = CELL_SIZE * 1.0
+      const tx = cx - m.dx * tailLen
+      const ty = cy - m.dy * tailLen
+
+      // Glowing tail streak
+      const trail = ctx.createLinearGradient(cx, cy, tx, ty)
+      trail.addColorStop(0,   'rgba(255, 240, 180, 0.95)')
+      trail.addColorStop(0.5, 'rgba(255, 140, 50, 0.55)')
+      trail.addColorStop(1,   'rgba(255, 60, 20, 0)')
+      ctx.beginPath()
+      ctx.moveTo(cx, cy)
+      ctx.lineTo(tx, ty)
+      ctx.lineCap     = 'round'
+      ctx.lineWidth   = tipR * 2
+      ctx.strokeStyle = trail
+      ctx.stroke()
+
+      // Bright hot tip
+      const tip = ctx.createRadialGradient(cx, cy, 0, cx, cy, tipR * 1.8)
+      tip.addColorStop(0,   '#fffde0')
+      tip.addColorStop(0.4, '#ffd13b')
+      tip.addColorStop(1,   'rgba(255,80,30,0)')
+      ctx.beginPath()
+      ctx.arc(cx, cy, tipR * 1.8, 0, Math.PI * 2)
+      ctx.fillStyle = tip
+      ctx.fill()
+    }
+  }
+
+  function drawExplosions(now) {
+    if (explosions.length === 0) return
+    for (const e of explosions) {
+      const t = (now - e.startTime) / EXPLOSION_TTL_MS
+      if (t < 0 || t >= 1) continue
+      const cx   = e.x * CELL_SIZE
+      const cy   = e.y * CELL_SIZE
+      const fade = 1 - t
+
+      // Expanding shockwave ring
+      const ringR = CELL_SIZE * (0.25 + 1.15 * t)
+      ctx.beginPath()
+      ctx.arc(cx, cy, ringR, 0, Math.PI * 2)
+      ctx.strokeStyle = `rgba(255, 210, 110, ${fade})`
+      ctx.lineWidth   = 1 + 3 * fade
+      ctx.stroke()
+
+      // Bright core fireball, shrinks as it fades
+      const coreR = CELL_SIZE * 0.55 * (0.6 + 0.4 * fade)
+      const core  = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR)
+      core.addColorStop(0,   `rgba(255, 255, 230, ${fade})`)
+      core.addColorStop(0.5, `rgba(255, 160, 60, ${0.7 * fade})`)
+      core.addColorStop(1,   'rgba(255, 60, 0, 0)')
+      ctx.beginPath()
+      ctx.arc(cx, cy, coreR, 0, Math.PI * 2)
+      ctx.fillStyle = core
+      ctx.fill()
+
+      // Sparks fanning outward
+      const sparks = 8
+      for (let i = 0; i < sparks; i++) {
+        const angle = (i / sparks) * Math.PI * 2 + e.startTime * 0.0017
+        const dist  = CELL_SIZE * (0.25 + 1.25 * t)
+        const sx    = cx + Math.cos(angle) * dist
+        const sy    = cy + Math.sin(angle) * dist
+        ctx.beginPath()
+        ctx.arc(sx, sy, 1 + 2 * fade, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(255, 220, 130, ${fade})`
+        ctx.fill()
+      }
+    }
+  }
+
   function buildSnakePath(segments) {
     ctx.beginPath()
     segments.forEach(({ x, y }, i) => {
@@ -878,10 +1084,13 @@
     drawObstacles(now)
     drawFood(now)
     drawPowerUp(now)
+    drawMissiles(now)
 
     const segments = getDrawSegments(t)
     drawSnakeBody(segments, now)
     drawSnakeHead(segments, now)
+
+    drawExplosions(now)
 
     if (!started && !gameOver) {
       ctx.fillStyle = 'rgba(0,0,0,0.62)'
