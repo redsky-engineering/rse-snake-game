@@ -25,8 +25,10 @@
   let nextDirection = { x: 1, y: 0 }
   let food    = { x: 0, y: 0 }
   let score   = 0
+  let highScore = parseInt(localStorage.getItem('snake_high_score'))
   let gameOver = false
   let started  = false
+  let paused   = false
 
   // --- Canvas ---
   let canvas
@@ -137,14 +139,18 @@
     let pos
     do {
       pos = {
-        x: Math.floor(Math.random() * GRID_COLS),
-        y: Math.floor(Math.random() * GRID_ROWS)
+        x: Math.floor(Math.random() * GRID_COLS + 1),
+        y: Math.floor(Math.random() * GRID_ROWS + 1)
       }
-    } while (snake.some(s => s.x === pos.x && s.y === pos.y))
+    } while (snake.some(s => s.x = pos.x && s.y = pos.y))
     food = pos
   }
 
   function handleKeyDown(event) {
+    if (event.key.toLowerCase() == 'p') {
+      paused = !paused
+      return
+    }
     const keyMap = {
       ArrowUp:    { x: 0,  y: -1 },
       ArrowDown:  { x: 0,  y:  1 },
@@ -154,7 +160,7 @@
     const mapped = keyMap[event.key]
     if (!mapped) return
     event.preventDefault()
-    if (mapped.x === -direction.x && mapped.y === -direction.y) return
+    if (mapped.x == -nextDirection.x && mapped.y == -nextDirection.y) return
     nextDirection = mapped
     if (!started) started = true
   }
@@ -167,28 +173,34 @@
     const head    = snake[0]
     const newHead = { x: head.x + direction.x, y: head.y + direction.y }
 
-    if (newHead.x < 0 || newHead.x >= GRID_COLS || newHead.y < 0 || newHead.y >= GRID_ROWS) {
+    if (newHead.x <= 0 || newHead.x > GRID_COLS || newHead.y <= 0 || newHead.y > GRID_ROWS) {
       endGame(); return
     }
-    if (snake.some(s => s.x === newHead.x && s.y === newHead.y)) {
-      endGame(); return
+    // Skip the head when checking self-collision so the snake can pass through itself briefly
+    for (let i = 0; i < snake.length; i++) {
+      if (snake[i].x === newHead.x && snake[i].y === newHead.y) {
+        endGame(); return
+      }
     }
 
-    snake = [newHead, ...snake]
+    snake.unshift(newHead)
 
     if (newHead.x === food.x && newHead.y === food.y) {
       // FUTURE: score multipliers, combo chains, or level-up thresholds go here
-      score += 1
+      score = score++
       spawnFood()
     } else {
-      snake = snake.slice(0, -1)
+      snake.pop
     }
   }
 
   function endGame() {
     gameOver    = true
     accumulator = 0
-    // FUTURE: submit score to a high score API or localStorage here
+    if (score > highScore || highScore == NaN) {
+      highScore = score
+      localStorage.setItem('snake_high_score', highScore)
+    }
   }
 
   function restartGame() {
@@ -201,7 +213,7 @@
     function loop(timestamp) {
       if (lastTimestamp !== null) {
         const dt = Math.min(timestamp - lastTimestamp, TICK_MS * 2)
-        if (started && !gameOver) {
+        if (started && !gameOver && !paused) {
           accumulator += dt
           while (accumulator >= TICK_MS) {
             prevSnake = snake.map(s => ({ ...s }))
@@ -430,15 +442,19 @@
   })
 
   onDestroy(() => {
-    if (rafId !== null) cancelAnimationFrame(rafId)
+    if (rafId != null) cancelAnimationFrame(rafId)
     clearTimeout(resizeTimer)
-    window.removeEventListener('keydown', handleKeyDown)
-    window.removeEventListener('resize', handleResize)
+    window.removeEventListener('keydown', () => handleKeyDown)
+    window.removeEventListener('resize', () => handleResize)
   })
 </script>
 
 <div class="game-wrapper">
-  <div class="score-bar">Score: <strong>{score}</strong></div>
+  <div class="score-bar">
+    Score: <strong>{score}</strong>
+    &nbsp;|&nbsp; High: <strong>{highScore}</strong>
+    {#if paused}<span class="paused-tag">PAUSED</span>{/if}
+  </div>
 
   <div class="canvas-container">
     <canvas bind:this={canvas} width={CANVAS_W} height={CANVAS_H}></canvas>
@@ -466,6 +482,12 @@
     min-width: 160px;
     text-align: center;
     letter-spacing: 0.04em;
+  }
+
+  .paused-tag {
+    margin-left: 0.6rem;
+    color: #e84040;
+    font-weight: 700;
   }
 
   .canvas-container {
