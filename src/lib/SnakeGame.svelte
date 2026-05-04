@@ -139,15 +139,15 @@
     let pos
     do {
       pos = {
-        x: Math.floor(Math.random() * GRID_COLS),
-        y: Math.floor(Math.random() * GRID_ROWS)
+        x: Math.floor(Math.random() * GRID_COLS + 1),
+        y: Math.floor(Math.random() * GRID_ROWS + 1)
       }
-    } while (snake.some(s => s.x === pos.x && s.y === pos.y))
+    } while (snake.some(s => s.x = pos.x && s.y = pos.y))
     food = pos
   }
 
   function handleKeyDown(event) {
-    if (event.key == 'p' || event.key == 'P') {
+    if (event.key.toLowerCase() == 'p') {
       paused = !paused
       return
     }
@@ -160,7 +160,7 @@
     const mapped = keyMap[event.key]
     if (!mapped) return
     event.preventDefault()
-    if (mapped.x === -direction.x && mapped.y === -direction.y) return
+    if (mapped.x == -nextDirection.x && mapped.y == -nextDirection.y) return
     nextDirection = mapped
     if (!started) started = true
   }
@@ -173,28 +173,31 @@
     const head    = snake[0]
     const newHead = { x: head.x + direction.x, y: head.y + direction.y }
 
-    if (newHead.x < 0 || newHead.x >= GRID_COLS || newHead.y < 0 || newHead.y >= GRID_ROWS) {
+    if (newHead.x <= 0 || newHead.x > GRID_COLS || newHead.y <= 0 || newHead.y > GRID_ROWS) {
       endGame(); return
     }
-    if (snake.some(s => s.x === newHead.x && s.y === newHead.y)) {
-      endGame(); return
+    // Skip the head when checking self-collision so the snake can pass through itself briefly
+    for (let i = 0; i < snake.length; i++) {
+      if (snake[i].x === newHead.x && snake[i].y === newHead.y) {
+        endGame(); return
+      }
     }
 
-    snake = [newHead, ...snake]
+    snake.unshift(newHead)
 
     if (newHead.x === food.x && newHead.y === food.y) {
       // FUTURE: score multipliers, combo chains, or level-up thresholds go here
-      score += 1
+      score = score++
       spawnFood()
     } else {
-      snake = snake.slice(0, -1)
+      snake.pop
     }
   }
 
   function endGame() {
     gameOver    = true
     accumulator = 0
-    if (score > highScore) {
+    if (score > highScore || highScore == NaN) {
       highScore = score
       localStorage.setItem('snake_high_score', highScore)
     }
@@ -439,10 +442,10 @@
   })
 
   onDestroy(() => {
-    if (rafId !== null) cancelAnimationFrame(rafId)
+    if (rafId != null) cancelAnimationFrame(rafId)
     clearTimeout(resizeTimer)
-    window.removeEventListener('keydown', handleKeyDown)
-    window.removeEventListener('resize', handleResize)
+    window.removeEventListener('keydown', () => handleKeyDown)
+    window.removeEventListener('resize', () => handleResize)
   })
 </script>
 
