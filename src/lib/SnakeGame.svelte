@@ -25,8 +25,10 @@
   let nextDirection = { x: 1, y: 0 }
   let food    = { x: 0, y: 0 }
   let score   = 0
+  let highScore = parseInt(localStorage.getItem('snake_high_score'))
   let gameOver = false
   let started  = false
+  let paused   = false
 
   // --- Canvas ---
   let canvas
@@ -145,6 +147,10 @@
   }
 
   function handleKeyDown(event) {
+    if (event.key == 'p' || event.key == 'P') {
+      paused = !paused
+      return
+    }
     const keyMap = {
       ArrowUp:    { x: 0,  y: -1 },
       ArrowDown:  { x: 0,  y:  1 },
@@ -188,7 +194,10 @@
   function endGame() {
     gameOver    = true
     accumulator = 0
-    // FUTURE: submit score to a high score API or localStorage here
+    if (score > highScore) {
+      highScore = score
+      localStorage.setItem('snake_high_score', highScore)
+    }
   }
 
   function restartGame() {
@@ -201,7 +210,7 @@
     function loop(timestamp) {
       if (lastTimestamp !== null) {
         const dt = Math.min(timestamp - lastTimestamp, TICK_MS * 2)
-        if (started && !gameOver) {
+        if (started && !gameOver && !paused) {
           accumulator += dt
           while (accumulator >= TICK_MS) {
             prevSnake = snake.map(s => ({ ...s }))
@@ -438,7 +447,11 @@
 </script>
 
 <div class="game-wrapper">
-  <div class="score-bar">Score: <strong>{score}</strong></div>
+  <div class="score-bar">
+    Score: <strong>{score}</strong>
+    &nbsp;|&nbsp; High: <strong>{highScore}</strong>
+    {#if paused}<span class="paused-tag">PAUSED</span>{/if}
+  </div>
 
   <div class="canvas-container">
     <canvas bind:this={canvas} width={CANVAS_W} height={CANVAS_H}></canvas>
@@ -466,6 +479,12 @@
     min-width: 160px;
     text-align: center;
     letter-spacing: 0.04em;
+  }
+
+  .paused-tag {
+    margin-left: 0.6rem;
+    color: #e84040;
+    font-weight: 700;
   }
 
   .canvas-container {
